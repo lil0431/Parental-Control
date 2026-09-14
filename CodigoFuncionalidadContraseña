@@ -1,0 +1,118 @@
+import subprocess
+import signal
+import sys
+import tkinter as tk
+from tkinter import messagebox
+from mitmproxy import http
+from bs4 import BeautifulSoup
+from datetime import datetime, time
+import csv
+import pyminizip
+
+import os
+# Activar el proxy antes de iniciar
+subprocess.call(['bash', 'toggle_proxy.sh'])
+
+def cleanup(signum, frame):
+    # Desactivar el proxy
+    subprocess.call(['bash', 'toggle_proxy.sh'])
+    sys.exit()
+
+# Manejar la señal de interrupción (Ctrl+C)
+signal.signal(signal.SIGINT, cleanup)
+
+# Lista de palabras clave
+blocked_keywords = ["juegos", "adultos", "xxx", "sexo"]
+
+# Horario permitido
+allowed_start_time = time(8, 32)  # 8:30 AM
+allowed_end_time = time(16, 45)   # 8:45 PM
+
+# Archivo para guardar los reportes
+report_file = "reportes_bloqueo.csv"
+report_file2 = "reportes_bloqueo"
+password = "password123"
+
+# Crear el archivo de reportes si no existe
+def init_report_file():
+    with open(report_file, 'a', newline='') as csvfile:
+        fieldnames = ['timestamp', 'url', 'motivo', 'contenido_bloqueado']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        csvfile.seek(0, 2)  # Comprobar si el archivo está vacío
+        if csvfile.tell() == 0:
+            writer.writeheader()  # Escribir la cabecera del archivo
+
+# Función para registrar el intento bloqueado en el archivo de reportes
+def log_report(url, motivo, contenido_bloqueado=""):
+    with open(report_file, 'a', newline='') as csvfile:
+        fieldnames = ['timestamp', 'url', 'motivo', 'contenido_bloqueado']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        writer.writerow({'timestamp': timestamp, 'url': url, 'motivo': motivo, 'contenido_bloqueado': contenido_bloqueado})
+        password_csv(report_file, report_file2, password)
+        os.remove(report_file)
+
+
+
+def password_csv(originalFile, name, password):
+    file_name = name + ".zip"
+
+    pyminizip.compress(originalFile, None, file_name, password, 5)
+    
+    print("El fichero se ha guardado satisfactoriamente")
+
+
+# Función para mostrar un pop-up
+def show_popup(message):
+    root = tk.Tk()
+    root.withdraw()  # Oculta la ventana principal de Tkinter
+    messagebox.showwarning("Acceso Denegado", message)
+    root.destroy()  # Cierra la ventana después de mostrar el mensaje
+
+# Verificar si está dentro del horario permitido
+def is_within_allowed_hours():
+    #current_hour = datetime.now().hour
+    #return allowed_start_hour <= current_hour < allowed_end_hour
+    current_time = datetime.now().time()  # Obtiene la hora actual (incluye horas y minutos)
+    return allowed_start_time <= current_time <= allowed_end_time
+
+
+# Inicializar el archivo de reportes
+init_report_file()
+
+def request(flow: http.HTTPFlow) -> None:
+    # Verificar el horario antes de cualquier otra acción
+    if not is_within_allowed_hours():
+        # Mostrar un pop-up al niño informando que no puede acceder en este momento
+        show_popup("El acceso a internet no está permitido en este horario.")
+        
+        # Registrar en el reporte
+        log_report(flow.request.pretty_url, "Bloqueado por horario")
+        
+        # Redirigir a una página de bloqueo
+        flow.response = http.Response.make(302, b"", {"Location": "https://i.pinimg.com/originals/73/f8/fd/73f8fd1a923955e454b352abca602d2d.gif"})
+        return
+
+    # Bloquear por URL
+    url = flow.request.pretty_url
+    if any(keyword in url for keyword in blocked_keywords):
+        # Registrar en el reporte
+        log_report(url, "Bloqueado por URL", contenido_bloqueado=url)
+        
+        # Redirigir a una página de bloqueo
+        flow.response = http.Response.make(302, b"", {"Location": "https://i.pinimg.com/originals/73/f8/fd/73f8fd1a923955e454b352abca602d2d.gif"})
+        return
+
+def response(flow: http.HTTPFlow) -> None:
+    # Bloquear por contenido
+    if "text/html" in flow.response.headers.get("Content-Type", ""):
+        html = flow.response.text
+        soup = BeautifulSoup(html, "html.parser")
+        text = soup.get_text().lower()
+        
+        if any(keyword in text for keyword in blocked_keywords):
+            # Registrar en el reporte
+            log_report(flow.request.pretty_url, "Bloqueado por contenido", contenido_bloqueado=flow.request.pretty_url)
+            
+            # Redirigir a una página de bloqueo
+            flow.response = http.Response.make(302, b"", {"Location": "https://i.pinimg.com/originals/73/f8/fd/73f8fd1a923955e454b352abca602d2d.gif"})
